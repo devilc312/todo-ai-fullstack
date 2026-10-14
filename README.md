@@ -1,319 +1,176 @@
-# Todo AI — FastAPI, PostgreSQL, Redis, React
+<div align="center">
 
-Ứng dụng quản lý công việc full-stack gồm tài khoản, phân quyền `user/admin`, Todo, thông báo sắp đến hạn theo thời gian thực và trợ lý AI dùng Anthropic hoặc chế độ fallback không cần API key.
+# Todo AI
 
-> **Trạng thái hiện tại (01/08/2026):** dự án đã hoàn chỉnh cho development/demo local bằng Docker, với auth cookie HttpOnly + CSRF, migration đồng bộ, UI các luồng chính và test regression. Chưa nên public trực tiếp lên Internet trước khi hoàn thành các mục production-only trong phần [Việc còn lại](#việc-còn-lại-và-lỗi-đã-biết).
+**Ứng dụng quản lý công việc full-stack với trợ lý AI, thông báo realtime và nền tảng bảo mật nhiều lớp.**
 
-## 1. Tính năng đã có
+[![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-7.4-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 
-- Đăng ký, đăng nhập, refresh-token rotation, đăng xuất và cập nhật hồ sơ.
-- Tài khoản mới mặc định có role `user`; API quản trị được bảo vệ bằng role `admin`.
-- Admin xem tài khoản, cấp/thu hồi quyền, khóa/mở tài khoản và không thể vô hiệu hóa admin hoạt động cuối cùng.
-- Todo CRUD, tìm kiếm, trạng thái, ưu tiên, deadline, reminder, category, tags và phân trang ở backend.
-- Notification được lưu trong PostgreSQL, Redis Pub/Sub và WebSocket phục vụ realtime.
-- Reminder worker chạy độc lập và dùng Redis lock để hạn chế xử lý trùng.
-- AI gợi ý Todo và chat bằng Anthropic; khi không có API key sẽ dùng fallback rule-based.
-- OpenAPI tại `/docs`, liveness tại `/health`, readiness tại `/ready`.
-- Docker Compose chạy PostgreSQL, Redis, API, worker và frontend.
+</div>
 
-Một số API backend như category, statistics, filter nâng cao và trạng thái `archived` chưa có UI đầy đủ. Xem [Việc còn lại](#việc-còn-lại-và-lỗi-đã-biết).
+---
 
-## 2. Stack
+## Tổng quan
+
+Todo AI là ứng dụng web quản lý công việc được xây dựng từ đầu, gồm backend FastAPI bất đồng bộ, frontend React 19 và toàn bộ hạ tầng đóng gói bằng Docker Compose.
+
+Dự án tập trung vào những phần thường bị bỏ qua trong một ứng dụng CRUD thông thường: vòng đời xác thực an toàn, đẩy dữ liệu realtime, tác vụ nền có chống trùng lặp, và tích hợp LLM có cơ chế dự phòng khi nhà cung cấp không khả dụng.
+
+> **Trạng thái:** hoàn chỉnh cho môi trường development/demo bằng Docker. Các hạng mục cần làm trước khi deploy production được liệt kê ở [mục 8](#8-giới-hạn-hiện-tại).
+
+---
+
+## 1. Tính năng
+
+### Xác thực & phân quyền
+- Đăng ký, đăng nhập, đăng xuất, cập nhật hồ sơ
+- Mật khẩu băm bằng **Argon2**
+- **JWT access token** đặt trong cookie `HttpOnly`
+- **Refresh token rotation** — token lưu dưới dạng hash, không lưu plaintext
+- Chống **CSRF** bằng cơ chế double-submit cookie kết hợp kiểm tra Origin
+- Phân quyền `user` / `admin`; admin không thể tự vô hiệu hóa admin hoạt động cuối cùng
+
+### Quản lý công việc
+- CRUD đầy đủ, tìm kiếm, lọc theo trạng thái / độ ưu tiên / deadline
+- Danh mục (category) và tag
+- Phân trang, sắp xếp, thống kê theo múi giờ người dùng
+- Reminder theo deadline
+
+### Realtime
+- **WebSocket** đẩy thông báo tức thì, xác thực bằng **ticket dùng một lần** thay vì truyền token qua URL
+- **Redis Pub/Sub** làm kênh truyền giữa worker và các kết nối WebSocket
+- Polling 30 giây làm fallback khi WebSocket mất kết nối
+
+### Tác vụ nền
+- **Reminder worker** chạy như service độc lập, quét công việc sắp đến hạn
+- **Redis distributed lock** đảm bảo mỗi reminder chỉ được xử lý một lần dù chạy nhiều instance
+- Ghi database trước khi publish lên Pub/Sub để tránh mất thông báo
+
+### Trợ lý AI
+- Chat hội thoại có lưu lịch sử, giữ ngữ cảnh 10 lượt gần nhất
+- Phân tích công việc và gợi ý chia nhỏ thành subtask, đề xuất độ ưu tiên
+- Dùng **Anthropic API**, có **fallback rule-based** để ứng dụng vẫn hoạt động khi không có API key
+- **Rate limit** 30 request/giờ mỗi user, triển khai bằng **Lua script atomic** trên Redis
+
+---
+
+## 2. Kiến trúc
+
+```text
+Browser (React 19 + Tailwind)
+  ├─ HTTPS / REST ────> FastAPI ──SQLAlchemy 2 Async──> PostgreSQL 17
+  └─ WSS ─────────────> FastAPI WebSocket <──Pub/Sub─── Redis 7.4
+                                               ▲
+Reminder worker ──── query / insert ───────────┘
+        └─ Redis distributed lock (chống xử lý trùng)
+
+FastAPI AI service ──> Anthropic API (khi có key)
+                   └─> rule-based fallback (khi không có key)
+```
+
+**Nguyên tắc thiết kế**
+
+- PostgreSQL là nguồn dữ liệu bền vững duy nhất: user, role, token hash, todo, notification, lịch sử AI, audit log.
+- Redis **không** dùng làm kho lưu trữ chính — chỉ phục vụ rate limit, distributed lock và truyền realtime.
+- Toàn bộ tầng I/O là async: `asyncpg` cho database, `redis.asyncio` cho cache, `AsyncAnthropic` cho AI.
+- Worker tách khỏi API để lỗi ở tác vụ nền không ảnh hưởng request người dùng.
+
+---
+
+## 3. Công nghệ
 
 | Tầng | Công nghệ |
 |---|---|
-| API | Python 3.12+, FastAPI, Pydantic |
-| Data | PostgreSQL 17, SQLAlchemy 2 Async, asyncpg, Alembic |
-| Cache/realtime | Redis 7.4, Pub/Sub, distributed lock, WebSocket |
-| Auth | Argon2, JWT access token, opaque hashed refresh token |
-| AI | Anthropic async SDK + fallback |
-| Web | React 19, TypeScript, Vite 7, Tailwind CSS 4, TanStack Query |
-| Test | pytest, Ruff, Vitest, Testing Library, ESLint |
-| Runtime | Docker Compose, Nginx |
+| API | Python 3.12+, FastAPI, Pydantic v2, Uvicorn |
+| Dữ liệu | PostgreSQL 17, SQLAlchemy 2 Async, asyncpg, Alembic |
+| Cache / Realtime | Redis 7.4 — Pub/Sub, distributed lock, Lua script |
+| Xác thực | Argon2, JWT, opaque refresh token dạng hash |
+| AI | Anthropic Python SDK (async) + fallback rule-based |
+| Web | React 19, TypeScript, Vite 7, Tailwind CSS 4, TanStack Query, React Hook Form, Zod |
+| Kiểm thử | pytest, pytest-asyncio, Ruff, Vitest, Testing Library, ESLint |
+| Vận hành | Docker Compose, Nginx |
 
-## 3. Yêu cầu cài đặt
+**Quy mô:** 10 bảng dữ liệu · 27 endpoint · 7 service trong Compose · ~2.100 dòng Python backend.
 
-### Cách A — Docker (khuyến nghị)
+---
 
-Cần cài:
+## 4. Chạy thử nhanh
 
-- **Docker Desktop** có Docker Compose v2.
-- Windows: bật virtualization và dùng backend **WSL2** của Docker Desktop.
-- Git chỉ cần nếu tải dự án bằng `git clone`.
-- Tối thiểu nên có khoảng 4 GB RAM trống và 5 GB dung lượng đĩa cho image/volume.
-
-Kiểm tra sau khi cài:
-
-```powershell
-docker --version
-docker compose version
-docker info
-```
-
-Cài nhanh bằng `winget` trên Windows nếu máy chưa có Docker/Git:
-
-```powershell
-winget install -e --id Docker.DockerDesktop
-winget install -e --id Git.Git
-```
-
-Sau khi cài Docker Desktop, mở ứng dụng và chờ Docker Engine chạy trước khi dùng `docker compose`.
-
-### Cách B — Chạy source trực tiếp
-
-Cần cài:
-
-- **Python `>=3.12,<3.15`**; khuyến nghị Python 3.12 hoặc 3.13.
-- **Node.js 22.12+ hoặc Node.js 24 LTS** và npm.
-- **PostgreSQL 17**.
-- **Redis 7.x**. Redis không có bản native Windows chính thức phù hợp cho development hiện đại; trên Windows nên chạy Redis bằng Docker hoặc WSL2.
-
-Cài Python và Node.js LTS bằng `winget`:
-
-```powershell
-winget install -e --id Python.Python.3.12
-winget install -e --id OpenJS.NodeJS.LTS
-```
-
-Mở terminal mới rồi kiểm tra:
-
-```powershell
-python --version
-node --version
-npm --version
-```
-
-### Các cổng cần trống
-
-| Cổng | Dịch vụ |
-|---:|---|
-| `5432` | PostgreSQL |
-| `6379` | Redis |
-| `8000` | FastAPI |
-| `8080` | Frontend chạy bằng Docker/Nginx |
-| `5173` | Frontend chạy bằng Vite development |
-
-`ANTHROPIC_API_KEY` là tùy chọn. Nếu để trống, ứng dụng vẫn chạy nhưng AI dùng fallback rule-based.
-
-## 4. Cài đặt và chạy bằng Docker
-
-### Bước 1 — Mở terminal tại đúng thư mục gốc
-
-File Compose chuẩn của toàn dự án là:
-
-```text
-D:\Dự án ma\compose.yaml
-```
-
-PowerShell:
-
-```powershell
-cd "D:\Dự án ma"
-docker compose config --quiet
-```
-
-Không chạy `docker compose` từ `C:\Users\cuong` vì ở đó không có `compose.yaml`. Không dùng `backend/docker-compose.yml` để khởi động toàn bộ dự án; đây là cấu hình backend phụ và hiện chưa đồng bộ đầy đủ với stack chính.
-
-### Bước 2 — Tạo file môi trường
-
-Chỉ sao chép file mẫu nếu `.env` chưa tồn tại.
-
-PowerShell:
-
-```powershell
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-notepad .env
-```
-
-Linux/macOS/Git Bash:
+Yêu cầu: **Docker Desktop** (Compose v2), khoảng 4 GB RAM trống.
 
 ```bash
-[ -f .env ] || cp .env.example .env
+git clone https://github.com/devilc312/todo-ai-fullstack.git
+cd todo-ai-fullstack
+
+cp .env.example .env
+# Mở .env và thay tối thiểu 3 giá trị:
+#   SECRET_KEY      — chuỗi ngẫu nhiên tối thiểu 32 ký tự
+#   ADMIN_EMAIL     — email admin khởi tạo
+#   ADMIN_PASSWORD  — mật khẩu admin mạnh
+
+docker compose up -d --build
 ```
 
-Trong `.env`, bắt buộc thay ít nhất:
+Tạo `SECRET_KEY`:
 
-```dotenv
-SECRET_KEY=<random-secret-toi-thieu-32-ky-tu>
-ADMIN_EMAIL=<email-admin>
-ADMIN_PASSWORD=<mat-khau-admin-manh>
-```
-
-Tạo `SECRET_KEY` bằng Python:
-
-```powershell
+```bash
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Nếu chỉ cài Docker và không có Python, tạo secret bằng PowerShell:
+Khi các container đã chạy:
 
-```powershell
-$bytes = New-Object byte[] 48
-[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-[Convert]::ToBase64String($bytes)
-```
+| Địa chỉ | Nội dung |
+|---|---|
+| http://localhost:8080 | Giao diện web |
+| http://localhost:8000/docs | Swagger / OpenAPI |
+| http://localhost:8000/health | Liveness probe |
+| http://localhost:8000/ready | Readiness probe (kiểm tra cả PostgreSQL và Redis) |
 
-Lưu ý:
+Đăng nhập lần đầu bằng `ADMIN_EMAIL` / `ADMIN_PASSWORD` đã đặt trong `.env`.
 
-- Không commit `.env`; `.gitignore` đã bỏ qua file này.
-- `.env.example` chỉ là template local và không được dùng nguyên trạng cho production.
-- Các credentials từng có trong `.env` hiện tại phải được **rotate trước khi public/deploy**.
-- Khi chạy trong Docker, `DATABASE_URL` phải dùng hostname `postgres` và `REDIS_URL` phải dùng hostname `redis`, không dùng `localhost`.
+`ANTHROPIC_API_KEY` là tùy chọn — để trống thì tính năng AI tự chuyển sang chế độ fallback.
 
-### Bước 3 — Build và khởi động
+<details>
+<summary><b>Chạy ở chế độ development (hạ tầng Docker, app chạy native)</b></summary>
 
-```powershell
-docker compose up -d --build
-```
+Cách này thuận tiện khi cần debug Python/React với hot reload.
 
-API container sẽ chạy migration và seed admin trước khi khởi động Uvicorn. Worker được chạy bằng service riêng.
+**Bước 1 — chỉ chạy database và cache**
 
-Kiểm tra trạng thái:
-
-```powershell
-docker compose ps
-docker compose logs --tail 100 api worker
-```
-
-Các service `postgres` và `redis` phải ở trạng thái `healthy`; `api`, `worker`, `web` phải ở trạng thái `Up`.
-
-### Bước 4 — Kiểm tra ứng dụng
-
-PowerShell:
-
-```powershell
-Invoke-RestMethod http://localhost:8000/health
-Invoke-RestMethod http://localhost:8000/ready
-```
-
-Hoặc:
-
-```powershell
-curl.exe -f http://localhost:8000/health
-curl.exe -f http://localhost:8000/ready
-```
-
-Địa chỉ sử dụng:
-
-- Web: <http://localhost:8080>
-- API: <http://localhost:8000>
-- Swagger/OpenAPI: <http://localhost:8000/docs>
-- Admin đầu tiên: `ADMIN_EMAIL` và `ADMIN_PASSWORD` trong `.env`.
-
-### Các lệnh Docker thường dùng
-
-```powershell
-# Xem log liên tục
-docker compose logs -f api worker web
-
-# Restart các service
-docker compose restart
-
-# Build lại sau khi đổi dependency/image
-docker compose up -d --build
-
-# Dừng và xóa container/network, giữ dữ liệu DB
-docker compose down
-
-# Xem các service
-docker compose ps
-```
-
-Reset toàn bộ dữ liệu local:
-
-```powershell
-docker compose down -v
-docker compose up -d --build
-```
-
-> **Cảnh báo:** `docker compose down -v` xóa PostgreSQL và Redis volumes của dự án. Không dùng lệnh này với dữ liệu cần giữ hoặc môi trường production.
-
-## 5. Development: database/Redis bằng Docker, app chạy native
-
-Đây là cách thuận tiện để debug Python/React mà không phải cài PostgreSQL và Redis trực tiếp trên Windows.
-
-### Bước 1 — Chạy hạ tầng
-
-Từ thư mục gốc:
-
-```powershell
-cd "D:\Dự án ma"
+```bash
 docker compose up -d postgres redis
-docker compose ps
 ```
 
-### Bước 2 — Cấu hình backend native
-
-Backend resolve `.env` cố định từ thư mục gốc dự án, không phụ thuộc current working directory. Khi chạy app native nhưng PostgreSQL/Redis ở Docker, đặt URL native trong biến môi trường của terminal để override root `.env` mà không tạo thêm file secret:
-
-```powershell
-cd "D:\Dự án ma\backend"
-$env:DATABASE_URL="postgresql+asyncpg://todo:todo@localhost:5432/todo"
-$env:REDIS_URL="redis://localhost:6379/0"
-```
-
-Giữ `SECRET_KEY`, `ADMIN_EMAIL` và `ADMIN_PASSWORD` trong root `.env`; không commit file này.
-
-### Bước 3 — Cài và chạy backend
-
-PowerShell:
-
-```powershell
-cd "D:\Dự án ma\backend"
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -e ".[dev]"
-alembic upgrade head
-python -m app.seed
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Nếu PowerShell chặn script activate, có thể chạy trực tiếp executable mà không activate:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.\.venv\Scripts\python.exe -m alembic upgrade head
-.\.venv\Scripts\python.exe -m app.seed
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
-```
-
-Linux/macOS/Git Bash:
+**Bước 2 — backend**
 
 ```bash
 cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+python -m venv .venv
+source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
+
 pip install -e ".[dev]"
+
+export DATABASE_URL="postgresql+asyncpg://todo:<mật-khẩu-trong-env>@localhost:5432/todo"
+export REDIS_URL="redis://localhost:6379/0"
+
 alembic upgrade head
 python -m app.seed
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --port 8000
 ```
 
-Chạy reminder worker ở terminal thứ hai, cũng tại thư mục `backend` và cùng virtual environment:
+Chạy reminder worker ở terminal thứ hai, cùng virtual environment:
 
-```powershell
-.\.venv\Scripts\python.exe -m app.workers.reminders
+```bash
+python -m app.workers.reminders
 ```
 
-### Bước 4 — Cài và chạy frontend
-
-Vite chạy từ `frontend` nên không tự đọc `.env` ở root. Tạo `frontend/.env.local`. Vì Vite chạy ở `5173` còn API native ở `8000`, cookie auth hoạt động qua CORS credentials; WebSocket dùng ticket một lần:
-
-```powershell
-cd "D:\Dự án ma\frontend"
-@"
-VITE_API_URL=http://localhost:8000/api/v1
-VITE_WS_URL=ws://localhost:8000/api/v1/ws/notifications
-"@ | Set-Content .env.local
-npm ci
-npm run dev
-```
-
-Mở <http://localhost:5173>.
-
-Nếu dùng Bash:
+**Bước 3 — frontend**
 
 ```bash
 cd frontend
@@ -321,249 +178,182 @@ cat > .env.local <<'EOF'
 VITE_API_URL=http://localhost:8000/api/v1
 VITE_WS_URL=ws://localhost:8000/api/v1/ws/notifications
 EOF
+
 npm ci
 npm run dev
 ```
 
-## 6. Development hoàn toàn không dùng Docker
+Mở http://localhost:5173
 
-Cài PostgreSQL 17 và Redis 7.x, tạo database/user PostgreSQL tương ứng. Ví dụ chạy bằng tài khoản quản trị trong `psql`:
+> Khi API chạy trong Docker, `DATABASE_URL` / `REDIS_URL` phải dùng hostname `postgres` / `redis`. Khi chạy native thì dùng `localhost`.
 
-```sql
-CREATE USER todo WITH PASSWORD 'replace-with-a-local-db-password';
-CREATE DATABASE todo OWNER todo;
+</details>
+
+<details>
+<summary><b>Các lệnh Docker thường dùng</b></summary>
+
+```bash
+docker compose ps                      # trạng thái service
+docker compose logs -f api worker      # theo dõi log
+docker compose restart                 # khởi động lại
+docker compose up -d --build           # build lại sau khi đổi dependency
+docker compose down                    # dừng, giữ nguyên dữ liệu
 ```
 
-Sau đó cập nhật root `.env` hoặc export biến môi trường trước khi chạy backend:
+Reset toàn bộ dữ liệu local:
 
-```dotenv
-DATABASE_URL=postgresql+asyncpg://todo:<url-encoded-password>@localhost:5432/todo
-REDIS_URL=redis://localhost:6379/0
+```bash
+docker compose down -v && docker compose up -d --build
 ```
 
-Nếu mật khẩu có ký tự đặc biệt, phải URL-encode phần mật khẩu trong `DATABASE_URL`. Sau đó làm tiếp các bước migration, seed, backend, worker và frontend ở phần trên.
+> **Cảnh báo:** `down -v` xóa volume PostgreSQL và Redis. Không dùng với dữ liệu cần giữ.
 
-Trên Windows, cách hybrid dùng Docker cho PostgreSQL/Redis vẫn được khuyến nghị vì Redis native không được dự án kiểm chứng.
+</details>
 
-## 7. Biến môi trường
+---
 
-| Biến | Bắt buộc | Ý nghĩa |
-|---|---:|---|
-| `APP_NAME` | Không | Tên hiển thị của API |
-| `ENVIRONMENT` | Có khi deploy | Môi trường `development`/production; production validation còn cần hoàn thiện |
-| `API_V1_PREFIX` | Không | Prefix API, mặc định `/api/v1` |
-| `SECRET_KEY` | Có | Khóa ký JWT, tối thiểu 32 ký tự; phải là random secret |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Không | Thời hạn access token |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | Không | Thời hạn refresh token |
-| `DATABASE_URL` | Có | PostgreSQL async URL `postgresql+asyncpg://...` |
-| `REDIS_URL` | Có | Redis cho rate limit, lock và realtime |
-| `CORS_ORIGINS` | Có | Danh sách origin cách nhau bằng dấu phẩy |
-| `DEFAULT_TIMEZONE` | Không | Múi giờ IANA, mặc định `Asia/Ho_Chi_Minh` |
-| `ADMIN_EMAIL` | Có | Email admin bootstrap |
-| `ADMIN_PASSWORD` | Có | Mật khẩu admin bootstrap mạnh |
-| `ANTHROPIC_API_KEY` | Không | Trống thì AI dùng fallback |
-| `ANTHROPIC_MODEL` | Khi dùng AI | Model Anthropic được account cho phép |
-| `AI_ENABLED` | Không | Bật/tắt tính năng gọi AI |
-| `REMINDER_WINDOW_MINUTES` | Không | Khoảng thời gian worker quét trước deadline |
-| `VITE_API_URL` | Có cho frontend | Public API endpoint được nhúng lúc build |
-| `VITE_WS_URL` | Có cho frontend | Public WebSocket endpoint được nhúng lúc build |
+## 5. API
 
-Production không được dùng credentials mẫu/hardcode. Hãy dùng secret manager của nền tảng triển khai.
-
-## 8. API chính
+Prefix mặc định: `/api/v1`
 
 | Method | Route | Chức năng |
 |---|---|---|
-| POST | `/api/v1/auth/register` | Tạo user và cấp token |
-| POST | `/api/v1/auth/login` | Đăng nhập |
-| POST | `/api/v1/auth/refresh` | Rotate refresh token |
-| POST | `/api/v1/auth/logout` | Thu hồi refresh token |
-| GET/PATCH | `/api/v1/auth/me` | Xem/sửa hồ sơ |
-| GET/POST | `/api/v1/todos` | List/filter và tạo Todo |
-| GET/PATCH/DELETE | `/api/v1/todos/{id}` | CRUD Todo thuộc user |
-| GET | `/api/v1/todos/stats` | Thống kê Todo |
-| GET/POST | `/api/v1/categories` | Danh mục của user |
-| GET | `/api/v1/notifications` | Danh sách và unread count |
-| PATCH/DELETE | `/api/v1/notifications/{id}/*` | Đọc/xóa notification |
-| WS | `/api/v1/ws/notifications?token=...` | Realtime notification; cách truyền token này cần được harden |
-| POST | `/api/v1/ai/suggest` | AI phân tích Todo |
-| POST | `/api/v1/ai/chat` | Chat AI theo conversation |
-| GET | `/api/v1/admin/users` | Admin xem user |
-| PUT | `/api/v1/admin/users/{id}/roles` | Admin gán role |
-| PATCH | `/api/v1/admin/users/{id}/active` | Admin khóa/mở user |
+| `POST` | `/auth/register` | Tạo tài khoản và cấp token |
+| `POST` | `/auth/login` | Đăng nhập |
+| `POST` | `/auth/refresh` | Xoay vòng refresh token |
+| `POST` | `/auth/logout` | Thu hồi refresh token |
+| `GET` `PATCH` | `/auth/me` | Xem / cập nhật hồ sơ |
+| `GET` `POST` | `/todos` | Danh sách (lọc, phân trang) / tạo mới |
+| `GET` `PATCH` `DELETE` | `/todos/{id}` | Thao tác trên một công việc |
+| `GET` | `/todos/stats` | Thống kê theo múi giờ người dùng |
+| `GET` `POST` | `/categories` | Danh mục của người dùng |
+| `PATCH` `DELETE` | `/categories/{id}` | Sửa / xóa danh mục |
+| `GET` | `/notifications` | Danh sách kèm số lượng chưa đọc |
+| `POST` | `/notifications/ws-ticket` | Cấp ticket một lần cho WebSocket |
+| `PATCH` | `/notifications/{id}/read` | Đánh dấu đã đọc |
+| `POST` | `/notifications/read-all` | Đánh dấu đã đọc tất cả |
+| `WS` | `/ws/notifications?ticket=...` | Kênh thông báo realtime |
+| `POST` | `/ai/suggest` | Phân tích công việc, gợi ý subtask |
+| `POST` | `/ai/chat` | Chat theo conversation |
+| `GET` `DELETE` | `/ai/conversations/{id}` | Xem / xóa hội thoại |
+| `GET` | `/admin/users` | Admin: danh sách người dùng |
+| `PUT` | `/admin/users/{id}/roles` | Admin: gán quyền |
+| `PATCH` | `/admin/users/{id}/active` | Admin: khóa / mở tài khoản |
 
-Swagger tại <http://localhost:8000/docs> là nguồn contract backend hiện tại. Frontend vẫn còn hai client method `/ai/suggestions` và `/ai/help` không có route backend tương ứng; xem phần lỗi đã biết.
+Contract đầy đủ xem tại `/docs` khi ứng dụng đang chạy.
 
-## 9. Kiểm thử và kiểm tra chất lượng
+---
 
-Từ thư mục gốc:
+## 6. Kiểm thử
 
-```powershell
+```bash
 # Backend
-.\backend\.venv\Scripts\python.exe -m pytest backend\tests -q
-.\backend\.venv\Scripts\python.exe -m ruff check backend
+cd backend && pytest tests -q && ruff check .
 
 # Frontend
 npm --prefix frontend test
 npm --prefix frontend run lint
 npm --prefix frontend run build
-npm --prefix frontend audit --omit=dev --audit-level=high
 
-# Migration (cần DB đang chạy và env đúng)
-cd backend
-.\.venv\Scripts\python.exe -m alembic current
-.\.venv\Scripts\python.exe -m alembic check
+# Migration (cần database đang chạy)
+cd backend && alembic check
 ```
 
-Kết quả xác minh ngày **01/08/2026**:
+Kết quả lần xác minh gần nhất:
 
-| Kiểm tra | Kết quả |
+| Hạng mục | Kết quả |
 |---|---|
-| Backend pytest | 9 tests passed, gồm cookie/CSRF/refresh và DB-backed Todo/category/stats |
-| Backend Ruff / compile | Passed |
-| Frontend build | Passed |
-| Frontend Vitest | 3 tests passed |
+| Backend pytest | 9 passed — cookie/CSRF/refresh, Todo/category/stats có DB thật |
+| Backend Ruff | Passed |
+| Frontend Vitest | 3 passed |
 | Frontend ESLint | Passed, 0 warning |
-| Docker health/readiness | API, web, PostgreSQL, Redis healthy; worker running |
-| `alembic current` | `b93475648a93` là head hiện tại |
+| Frontend build | Passed |
 | `alembic check` | Passed, không còn model/migration drift |
-| Local acceptance | Same-origin Nginx, cookie login, CSRF Todo create và WS ticket passed |
+| Docker health | API, web, PostgreSQL, Redis healthy; worker running |
 | Secret scan | Gitleaks passed |
-| npm audit production deps | 2 high advisory qua React Router unstable RSC; SPA này không dùng RSC |
 
-Test hiện đã chống regression cho auth cookie/CSRF/refresh/logout, validation, Todo/category/stats và WebSocket ticket. Các test chuyên sâu về multi-user RBAC, worker failure và AI provider vẫn thuộc backlog production.
+Phạm vi test hiện tại chống regression cho luồng xác thực, CRUD công việc và WebSocket ticket.
 
-## 10. Việc còn lại và lỗi đã biết
+---
 
-### Đã hoàn thành cho local
-
-- [x] Production fail-fast cho default secret/admin/database và cookie settings.
-- [x] Sửa migration drift bằng migration forward; `alembic check` xanh.
-- [x] Nginx proxy same-origin `/api` và WebSocket; frontend không hardcode localhost API.
-- [x] Access/refresh ở HttpOnly cookie, CSRF double-submit và WebSocket ticket dùng một lần.
-- [x] Dashboard bỏ filter rỗng; `.env` resolve ổn định từ root.
-- [x] Timezone-aware stats/display, validation đồng bộ và conflict trả `409`/`422`.
-- [x] AI contract/reliability/history; category CRUD, stats/filter/sort/archive UI.
-- [x] Error/loading/retry UX chính; worker commit trước publish; rate limit atomic và token retention.
-- [x] Docker image production dependencies, non-root backend, `npm ci`, healthcheck và local acceptance smoke.
-
-### Còn lại trước khi public production
-
-- [ ] Rotate toàn bộ secret/credentials từng dùng trong `.env`; lưu bằng secret manager.
-- [ ] Bật `COOKIE_SECURE=true`, HTTPS/WSS, domain thật và CORS production.
-- [ ] Chạy database-clean migration/seed/login/CRUD/worker/WebSocket và backup/restore drill trên môi trường staging.
-- [ ] Xử lý advisory React Router khi registry có bản vá tương thích. Advisory hiện chỉ ảnh hưởng unstable RSC API mà SPA không dùng; không chạy `npm audit fix --force` vì nó đề xuất downgrade breaking.
-- [ ] Tăng test multi-user ownership/RBAC, worker failure/idempotency, WebSocket handshake và AI provider timeout/error.
-- [ ] Thêm request ID, structured JSON logs, metrics, tracing/error monitoring và alert worker/readiness.
-- [ ] Thêm resource limits, CI, backup automation và retention cho audit log/AI history; review privacy dữ liệu AI.
-- [ ] Thay local `POSTGRES_PASSWORD=todo` và admin password hiện tại trước mọi hình thức public/deploy.
-
-## 11. Xử lý lỗi thường gặp
-
-### `no configuration file provided: not found`
-
-Bạn đang đứng sai thư mục. Chạy:
-
-```powershell
-cd "D:\Dự án ma"
-docker compose ps
-```
-
-### `ConnectionRefusedError: [WinError 1225]`
-
-API không kết nối được PostgreSQL, Redis hoặc service khác:
-
-```powershell
-docker compose ps
-docker compose logs --tail 100 postgres redis api worker
-```
-
-Quy tắc hostname:
-
-- API chạy **trong Docker**: `postgres:5432`, `redis:6379`.
-- API chạy **trực tiếp trên máy**: `localhost:5432`, `localhost:6379`.
-
-### Port đã được sử dụng
-
-Kiểm tra container đang giữ port 8000:
-
-```powershell
-docker ps --filter publish=8000 --format "table {{.ID}}`t{{.Names}}`t{{.Ports}}"
-```
-
-Kiểm tra process Windows:
-
-```powershell
-Get-NetTCPConnection -State Listen -LocalPort 8000,5432,6379,8080 -ErrorAction SilentlyContinue |
-  Select-Object LocalAddress,LocalPort,OwningProcess
-```
-
-Dừng stack/container cũ hoặc đổi port publish trong `compose.yaml`; không dừng/xóa process khi chưa xác định nó thuộc ứng dụng nào.
-
-### Dashboard không tải Todo và API trả `422`
-
-Lỗi này đã được sửa: frontend loại filter rỗng trước khi gửi request. Nếu còn gặp `422`, mở Network tab để kiểm tra client cũ/cache và rebuild frontend.
-
-### Chạy Alembic/Uvicorn trong `backend` nhưng dùng sai cấu hình
-
-Backend luôn resolve `.env` từ root dự án. Khi chạy native, đặt `DATABASE_URL`/`REDIS_URL` qua biến môi trường hoặc root `.env`; không cần tạo `backend/.env` workaround nữa.
-
-### `/ready` lỗi nhưng `/health` vẫn OK
-
-`/health` chỉ kiểm tra process API; `/ready` kiểm tra cả PostgreSQL và Redis. Xem health và log hai dependency:
-
-```powershell
-docker compose ps
-docker compose logs --tail 100 postgres redis api
-```
-
-### Không có notification realtime
-
-1. Kiểm tra `worker` đang `Up`.
-2. Kiểm tra `/ready`.
-3. Xem `VITE_WS_URL`: local dùng `ws://`, production dùng `wss://`.
-4. Reverse proxy production phải hỗ trợ `Upgrade`/`Connection` WebSocket.
-5. Notification đã lưu vẫn có thể xuất hiện qua polling nếu WebSocket mất kết nối.
-
-### AI luôn fallback
-
-- `ANTHROPIC_API_KEY` đang trống/sai, model không được account cho phép hoặc `AI_ENABLED=false`.
-- Restart API sau khi đổi env.
-- Không ghi API key vào README, source hoặc log.
-
-## 12. Cấu trúc chính
+## 7. Cấu trúc dự án
 
 ```text
 .
 ├── compose.yaml              # Stack chính: PostgreSQL, Redis, API, worker, web
-├── .env.example              # Template biến môi trường, không chứa secret thật
-├── README.md                 # Cài đặt, setup, trạng thái và backlog
-├── OPERATIONS_GUIDE.md       # Vận hành, backup/restore và production
+├── .env.example              # Template biến môi trường
+├── OPERATIONS_GUIDE.md       # Vận hành, backup/restore, triển khai
 ├── backend/
-│   ├── app/                  # FastAPI, models, schemas, services, worker
+│   ├── app/
+│   │   ├── api/              # Router: auth, todos, notifications, ai, admin
+│   │   ├── core/             # Config, database, redis, security
+│   │   ├── models/           # SQLAlchemy models (10 bảng)
+│   │   ├── schemas/          # Pydantic schemas
+│   │   ├── services/         # AI service, auth service, notifications
+│   │   └── workers/          # Reminder worker
 │   ├── alembic/              # Migration
-│   ├── tests/                # Backend tests
-│   ├── pyproject.toml        # Python dependencies/tooling
+│   ├── tests/
 │   └── Dockerfile
 └── frontend/
-    ├── src/                  # React pages, API client, hooks, components
-    ├── package.json
-    ├── package-lock.json
+    ├── src/
+    │   ├── api/              # API client (axios)
+    │   ├── pages/            # Dashboard, AI, Admin, Auth, Profile
+    │   ├── hooks/            # useAuth, useApi, useNotificationSocket
+    │   └── contexts/
     ├── nginx.conf
     └── Dockerfile
 ```
 
-## 13. Production checklist tối thiểu
+---
 
-- [ ] Hoàn thành toàn bộ P0 và test lại từ database sạch.
-- [ ] Secret, DB credentials và admin password mạnh, lưu trong secret manager.
-- [ ] HTTPS/WSS qua reverse proxy; CORS chỉ cho domain thật.
-- [ ] Không publish PostgreSQL/Redis ra Internet.
-- [ ] Migration chạy như job một lần trước rollout; `alembic check` phải xanh.
-- [ ] Backup PostgreSQL tự động và thử restore định kỳ.
-- [ ] API/worker chạy non-root, không `--reload`, có restart/resource limits.
-- [ ] Monitoring `/ready`, HTTP error/latency, DB pool, worker lag và disk.
-- [ ] CI chạy backend/frontend tests, lint, build, migration và dependency audit.
-- [ ] Review privacy/retention trước khi gửi nội dung Todo/chat cho AI provider.
+## 8. Giới hạn hiện tại
 
-Xem thêm quy trình backup, restore, migration và vận hành tại [OPERATIONS_GUIDE.md](OPERATIONS_GUIDE.md).
+Dự án đã hoàn chỉnh cho development và demo local. Trước khi đưa lên môi trường production cần bổ sung:
+
+- Bật HTTPS/WSS, `COOKIE_SECURE=true`, cấu hình CORS theo domain thật
+- Chuyển secret sang secret manager của nền tảng triển khai
+- Mở rộng test cho RBAC nhiều người dùng, lỗi worker và timeout từ AI provider
+- Thêm structured logging, request ID, metrics và alerting
+- Thiết lập CI, tự động backup PostgreSQL và chính sách retention cho audit log
+
+Một số API backend (lọc nâng cao, trạng thái `archived`) đã có nhưng chưa được đưa đầy đủ lên giao diện.
+
+Chi tiết quy trình vận hành, backup và restore: [OPERATIONS_GUIDE.md](OPERATIONS_GUIDE.md)
+
+---
+
+## 9. Khắc phục sự cố
+
+<details>
+<summary><b>Các lỗi thường gặp</b></summary>
+
+**`no configuration file provided: not found`** — đang đứng sai thư mục, hãy `cd` về thư mục gốc chứa `compose.yaml`.
+
+**`ConnectionRefusedError`** — API không kết nối được PostgreSQL hoặc Redis:
+
+```bash
+docker compose ps
+docker compose logs --tail 100 postgres redis api worker
+```
+
+Hostname phải đúng ngữ cảnh: trong Docker dùng `postgres` / `redis`, chạy native dùng `localhost`.
+
+**Port bị chiếm** — các cổng cần trống: `5432` (PostgreSQL), `6379` (Redis), `8000` (API), `8080` (web), `5173` (Vite dev).
+
+**`/ready` lỗi nhưng `/health` vẫn OK** — `/health` chỉ kiểm tra tiến trình API; `/ready` kiểm tra cả PostgreSQL và Redis. Xem log hai dependency này.
+
+**Không nhận được thông báo realtime** — kiểm tra worker đang `Up`, `/ready` trả OK, và `VITE_WS_URL` đúng scheme (`ws://` cho local, `wss://` cho production). Reverse proxy phải hỗ trợ header `Upgrade` / `Connection`.
+
+**AI luôn trả lời theo fallback** — `ANTHROPIC_API_KEY` trống hoặc sai, model không được tài khoản cho phép, hoặc `AI_ENABLED=false`. Khởi động lại API sau khi đổi biến môi trường.
+
+</details>
+
+---
+
+## Giấy phép
+
+MIT
+
+<div align="center">
+<sub>Xây dựng bởi <a href="https://github.com/devilc312">@devilc312</a></sub>
+</div>
